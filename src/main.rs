@@ -44,76 +44,7 @@ async fn main() -> Result<()> {
 
     builder.set_verify_callback(
     SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
-    |preverified: bool, x509_ctx: &mut X509StoreContextRef| {
-
-        // display the chain
-        if let Some(chain) = x509_ctx.chain() {
-            for (i, c) in chain.iter().enumerate() {
-                eprintln!("chain[{i}] subject={}", x509_name_to_string(c.subject_name()));
-            }
-        }
-
-        // You can inspect the "current" cert in the chain:
-        if let Some(cert) = x509_ctx.current_cert() {
-            if let Some(cn) = cert.subject_name()
-                .entries_by_nid(openssl::nid::Nid::COMMONNAME)
-                .next()
-                .and_then(|e| e.data().as_utf8().ok())
-            {
-                eprintln!("Verifying peer cert CN={}", cn);
-            }
-        }
-
-        // Keep OpenSSL's verdict unless you have a strong reason to override:
-        if !preverified {
-            eprintln!("FAILED: PREVERIFIED: Verifying peer");
-            return false;
-        }
-
-        // Only ENFORCE our policy on the LEAF certificate (depth 0).
-        if x509_ctx.error_depth() != 0 {
-            // Log if you want visibility, but don't enforce OU here.
-            if let Some(c) = x509_ctx.current_cert() {
-                eprintln!("chain[{}] subject={}", x509_ctx.error_depth(), {
-                    // small helper to print CN
-                    let cn = c.subject_name()
-                        .entries_by_nid(Nid::COMMONNAME)
-                        .next()
-                        .and_then(|e| e.data().as_utf8().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    format!("CN={}", cn)
-                });
-            }
-            return true;
-        }
-
-        // depth == 0 (leaf) — ENFORCE OU policy
-        let Some(leaf) = x509_ctx.current_cert() else {
-            eprintln!("no current cert at depth 0");
-            return false;
-        };
-
-
-        let has_ou = leaf.subject_name()
-            .entries_by_nid(Nid::ORGANIZATIONALUNITNAME)
-            .any(|e| matches!(e.data().as_utf8(), Ok(s) if <OpensslString as AsRef<str>>::as_ref(&s) == TRUST_DEVICES));
-
-        if !has_ou {
-            // Helpful: print the full subject so you can see what’s actually there
-            eprintln!("reject leaf: missing OU={}; subject={:?}", TRUST_DEVICES, {
-                leaf.subject_name().entries()
-                    .filter_map(|e| e.data().as_utf8().ok()
-                        .map(|v| format!("{}={}", e.object().nid().short_name().unwrap_or("?"), v)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            });
-        }
-
-        has_ou
-    },
-
-);
+    |preverified: bool, x509_ctx: &mut X509StoreContextRef| verifier_cb(preverified, x509_ctx));
 
     let acceptor = builder.build();
 
@@ -213,4 +144,77 @@ pub fn build_acceptor_from_pkcs12(p12_path: &str, password: &str) -> Result<SslA
     }
 
     Ok(builder)
+}
+
+pub fn verifier_always_true_cb(_preverified: bool, _x509_ctx: &mut X509StoreContextRef) -> bool {
+    eprintln!("always verified true!");
+    true
+}
+
+pub fn verifier_cb(preverified: bool, x509_ctx: &mut X509StoreContextRef) -> bool {
+    // display the chain
+    if let Some(chain) = x509_ctx.chain() {
+        for (i, c) in chain.iter().enumerate() {
+            eprintln!("chain[{i}] subject={}", x509_name_to_string(c.subject_name()));
+        }
+    }
+
+    // You can inspect the "current" cert in the chain:
+    if let Some(cert) = x509_ctx.current_cert() {
+        if let Some(cn) = cert.subject_name()
+            .entries_by_nid(openssl::nid::Nid::COMMONNAME)
+            .next()
+            .and_then(|e| e.data().as_utf8().ok())
+        {
+            eprintln!("Verifying peer cert CN={}", cn);
+        }
+    }
+
+    // Keep OpenSSL's verdict unless you have a strong reason to override:
+    if !preverified {
+        eprintln!("FAILED: PREVERIFIED: Verifying peer");
+        return false;
+    }
+
+    // Only ENFORCE our policy on the LEAF certificate (depth 0).
+    if x509_ctx.error_depth() != 0 {
+        // Log if you want visibility, but don't enforce OU here.
+        if let Some(c) = x509_ctx.current_cert() {
+            eprintln!("chain[{}] subject={}", x509_ctx.error_depth(), {
+                // small helper to print CN
+                let cn = c.subject_name()
+                    .entries_by_nid(Nid::COMMONNAME)
+                    .next()
+                    .and_then(|e| e.data().as_utf8().ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                format!("CN={}", cn)
+            });
+        }
+        return true;
+    }
+
+    // depth == 0 (leaf) — ENFORCE OU policy
+    let Some(leaf) = x509_ctx.current_cert() else {
+        eprintln!("no current cert at depth 0");
+        return false;
+    };
+
+
+    let has_ou = leaf.subject_name()
+        .entries_by_nid(Nid::ORGANIZATIONALUNITNAME)
+        .any(|e| matches!(e.data().as_utf8(), Ok(s) if <OpensslString as AsRef<str>>::as_ref(&s) == TRUST_DEVICES));
+
+    if !has_ou {
+        // Helpful: print the full subject so you can see what’s actually there
+        eprintln!("reject leaf: missing OU={}; subject={:?}", TRUST_DEVICES, {
+            leaf.subject_name().entries()
+                .filter_map(|e| e.data().as_utf8().ok()
+                    .map(|v| format!("{}={}", e.object().nid().short_name().unwrap_or("?"), v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+    }
+
+    has_ou
 }
