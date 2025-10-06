@@ -1,0 +1,12 @@
+[package]
+name = "tokio_openssl_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+openssl = { version = "0.10", features = ["vendored"] } # drop "vendored" if you have system OpenSSL
+tokio-openssl = "0.6"
+hex = "0.4.3"
+
