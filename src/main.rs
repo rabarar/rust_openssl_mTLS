@@ -1,8 +1,13 @@
-use anyhow::Result;
+use anyhow::{Result};
+use anyhow::anyhow;
+use anyhow::Context;
+
 
 use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
+use openssl::ssl::SslAcceptorBuilder;
+use openssl::pkcs12::{Pkcs12};
 use openssl::string::OpensslString;
-use openssl::x509::{X509StoreContextRef};
+use openssl::x509::{X509StoreContextRef, X509Ref, X509VerifyResult};
 use openssl::nid::Nid;
 use std::pin::Pin;
 
@@ -14,16 +19,27 @@ pub const TRUST_DEVICES: &str = "TrustedDevices";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+
     let addr = "0.0.0.0:8443";
 
     let ca = X509::from_pem(&std::fs::read("client-ca.pem")?)?;
 
+    let use_pem = true;
+    let mut builder:SslAcceptorBuilder;
+    
     // Build TLS acceptor (server config)
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
-    builder.set_certificate_chain_file("cert.pem")?;
-    builder.set_ca_file("client-ca.pem")?;
-    builder.add_client_ca(&ca)?;
+    if use_pem {
+        builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+        builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
+        builder.set_certificate_chain_file("cert.pem")?;
+        builder.set_ca_file("client-ca.pem")?;
+        builder.add_client_ca(&ca)?;
+    } else {
+        builder = build_acceptor_from_pkcs12("server.p12", "changeit")?;
+        builder.set_ca_file("client-ca.pem")?;
+        builder.add_client_ca(&ca)?;
+    }
+
     builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
 
     builder.set_verify_callback(
@@ -157,3 +173,44 @@ fn x509_name_to_string(name: &X509NameRef) -> String {
     parts.join(", ")
 }
 
+
+
+/// Heuristic to skip a root CA (self-signed) if it appears in the P12.
+/// This keeps the server from sending the root to clients.
+
+/// Robust self-signed check that works on a reference.
+fn is_self_signed(cert: &X509Ref) -> bool {
+    // OpenSSL will report OK if `cert` is issued by itself.
+    cert.issued(cert) == X509VerifyResult::OK
+}
+
+/// Build an SslAcceptor from a PKCS#12 bundle (server key + leaf + chain).
+/// Uses `parse2`, whose fields are: pkey: Option<...>, cert: Option<...>, ca: Stack<X509>.
+pub fn build_acceptor_from_pkcs12(p12_path: &str, password: &str) -> Result<SslAcceptorBuilder> {
+    let der = std::fs::read(p12_path)
+        .with_context(|| format!("reading {}", p12_path))?;
+    let p12 = Pkcs12::from_der(&der)?;
+    let mut parsed = p12.parse2(password)?; // pkey: Option<PKey<Private>>, cert: Option<X509>, ca: Stack<X509>
+
+    let pkey = parsed.pkey.ok_or_else(|| anyhow!("PKCS#12 has no private key"))?;
+    let cert = parsed.cert.ok_or_else(|| anyhow!("PKCS#12 has no end-entity certificate"))?;
+
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    builder.set_private_key(&pkey)?;
+    builder.set_certificate(&cert)?;
+
+    // IMPORTANT: iterate the *elements* with `.iter()` so each item is `&X509Ref`.
+    for cert_ref in parsed.ca.iter_mut() {
+
+        if let Some(cr) = cert_ref.pop() {
+            if is_self_signed(cr.as_ref()) {
+                continue; // don't send a self-signed root to clients
+            }
+            // Clone the element to an owned X509; add_extra_chain_cert takes ownership.
+            let owned: X509 = cr.to_owned();
+            builder.add_extra_chain_cert(owned)?;
+        }
+    }
+
+    Ok(builder)
+}
